@@ -12,9 +12,9 @@ import sys
 import os
 import pickle
 import sys
+
 from sklearn import metrics
-from sklearn.metrics import roc_auc_score
-from datetime import datetime
+from datetime import datetime, date
 
 
 # return iterator of labels and features with 'batch size'
@@ -27,15 +27,12 @@ def load_data_from_file_batching(file, batch_size):
             line = rd.readline()
             if not line:
                 break
+            line = line.strip('\n')
             cnt += 1
-            if '#' in line:
-                punc_idx = line.index('#')
-            else:
-                punc_idx = len(line)
             label = float(line[0:1])
-            if label>1:
-                label=1
-            feature_line = line[2:punc_idx]
+            if label > 1:
+                label = 1
+            feature_line = line[2:]
             words = feature_line.split(' ')
             cur_feature_list = []
             for word in words:
@@ -45,9 +42,8 @@ def load_data_from_file_batching(file, batch_size):
 
                 # if tokens[0]=='4532':
                 #    print('line ', cnt, ':    ',word, '    line:', line)
-                if len(tokens[1]) <= 0:
-                    tokens[1] = '0'
-                cur_feature_list.append([int(tokens[0]) - 1, float(tokens[1])])
+                cur_feature_list.append([int(tokens[0]), float(tokens[1])])
+
             features.append(cur_feature_list)
             labels.append(label)
             if cnt == batch_size:
@@ -59,12 +55,13 @@ def load_data_from_file_batching(file, batch_size):
         yield labels, features
 
 
+# features: [[idx1,val], [idx2,val], ...]
 def prepare_data_4_sp(labels, features, dim):
     instance_cnt = len(labels)
 
-    indices = []    # feature index
-    values = []     # feature value
-    values_2 = []   # square of value
+    indices = []    # feature indexes of each instance
+    values = []     # feature values of each instance
+    values_2 = []   # square of value of each instance
     shape = [instance_cnt, dim]
     feature_indices = []
 
@@ -107,17 +104,17 @@ def pre_build_data_cache(infile, outfile, feature_cnt, batch_size):
 
 def single_run(feature_cnt, field_cnt,  params):
 
-    print (params)
+    tf.reset_default_graph()
+
+    print(params)
 
     pre_build_data_cache_if_need(params['train_file'], feature_cnt, params['batch_size'])
     pre_build_data_cache_if_need(params['test_file'], feature_cnt, params['batch_size'])
     
-    params['train_file'] = params['train_file'].replace('.csv','.pkl').replace('.txt','.pkl')
-    params['test_file'] = params['test_file'].replace('.csv','.pkl').replace('.txt','.pkl')
+    params['train_file'] = params['train_file'].replace('.csv','.pkl').replace('.txt','.pkl').replace('.libfm','.pkl')
+    params['test_file'] = params['test_file'].replace('.csv','.pkl').replace('.txt','.pkl').replace('.libfm','.pkl')
   
     print('start single_run')
-    
-    tf.reset_default_graph()
 
     n_epoch = params['n_epoch']
     batch_size = params['batch_size']
@@ -125,7 +122,7 @@ def single_run(feature_cnt, field_cnt,  params):
     _indices = tf.placeholder(tf.int64, shape=[None, 2], name='raw_indices')
     _values = tf.placeholder(tf.float32, shape=[None], name='raw_values')
     _values2 = tf.placeholder(tf.float32, shape=[None], name='raw_values_square')
-    _shape = tf.placeholder(tf.int64, shape=[2], name='raw_shape')
+    _shape = tf.placeholder(tf.int64, shape=[2], name='raw_shape')  # shape: [instance_cnt, feature_cnt]
 
     _y = tf.placeholder(tf.float32, shape=[None, 1], name='Y')
     _ind = tf.placeholder(tf.int64, shape=[None])
@@ -134,14 +131,12 @@ def single_run(feature_cnt, field_cnt,  params):
                                                                  feature_cnt, field_cnt, params)
 
     # auc = tf.metrics.auc(_y, preds)
-
-
     saver = tf.train.Saver()
     sess = tf.Session()
     init = tf.global_variables_initializer()
     sess.run(init)
 
-    log_writer = tf.summary.FileWriter(params['log_path'], graph=sess.graph)
+    # log_writer = tf.summary.FileWriter(params['log_path'], graph=sess.graph)
 
     glo_ite = 0
 
@@ -172,30 +167,36 @@ def single_run(feature_cnt, field_cnt,  params):
             time_sess += time_cp02 - time_cp01
 
             train_loss_per_epoch += cur_loss
-            
 
-            log_writer.add_summary(summary, glo_ite)
+            # log_writer.add_summary(summary, glo_ite)
+
         end = clock()
         #print('time for eopch ', eopch, ' ', "{0:.4f}min".format((end - start) / 60.0), ' time_load_data:', "{0:.4f}".format(time_load_data), ' time_sess:',
         #      "{0:.4f}".format(time_sess), ' train_loss: ', train_loss_per_epoch, ' train_error: ', train_error_per_epoch)
-        if eopch % 5 == 0:
+        if eopch % 5 == 0 or eopch == n_epoch-1:
             model_path = params['model_path'] + "/" + str(params['layer_sizes']).replace(':', '_') + str(
                 params['reg_w_linear']).replace(':', '_')
-            os.makedirs(model_path, exist_ok=True)
-            saver.save(sess, model_path, global_step=eopch)            
-            auc=predict_test_file(preds, sess, params['test_file'], feature_cnt, _indices, _values, _shape, _y,
-                              _values2, _ind, eopch, batch_size, 'test', model_path, params['output_predictions'])
-            print('auc is ', auc, ', at epoch  ', eopch, ', time is {0:.4f} min'.format((end - start) / 60.0)
-                  , ', train_loss is {0:.2f}'.format(train_loss_per_epoch))
-            
+            # print(model_path)
 
-    log_writer.close()
+            # os.makedirs(model_path, exist_ok=True)
+            # saver.save(sess, model_path, global_step=eopch)
+
+            auc, logloss = predict_test_file(preds, sess, params['test_file'], feature_cnt, _indices, _values, _shape, _y,
+                              _values2, _ind, eopch, batch_size, 'test', model_path, params['output_predictions'])
+            rcd = 'auc is ', auc, 'logloss is ', logloss, ' at epoch  ', eopch, ', time is {0:.4f} min'.format((end - start) / 60.0), ', train_loss is {0:.2f}'.format(train_loss_per_epoch)
+            print(rcd)
+            log_file = open(params['model_path'] + "/logs/result", "a")
+            log_file.write(str(rcd) + '\n')
+            log_file.close()
+
+    # log_writer.close()
 
 
 def predict_test_file(preds, sess, test_file, feature_cnt, _indices, _values, _shape, _y, _values2, _ind, epoch,
-                      batch_size, tag, path, output_prediction = True):
+                      batch_size, tag, path, output_prediction=True):
+    day = date.today()
     if output_prediction:
-        wt = open(path + '/deepFM_pred_' + tag + str(epoch) + '.txt', 'w')
+        wt = open(path + 'pred/deepFM_pred_' + tag + str(epoch) + '-' + str(day)+'.txt', 'w')
 
     gt_scores = []
     pred_scores = []
@@ -211,17 +212,17 @@ def predict_test_file(preds, sess, test_file, feature_cnt, _indices, _values, _s
             for (gt, preded) in zip(test_input_in_sp['labels'].reshape(-1).tolist(), predictios):
                 wt.write('{0:d},{1:f}\n'.format(int(gt), preded))
                 gt_scores.append(gt)
-                #pred_scores.append(1.0 if preded >= 0.5 else 0.0)
+                # pred_scores.append(1.0 if preded >= 0.5 else 0.0)
                 pred_scores.append(preded)
         else:
             gt_scores.extend(test_input_in_sp['labels'].reshape(-1).tolist())
             pred_scores.extend(predictios)
-
-    auc = roc_auc_score(np.asarray(gt_scores), np.asarray(pred_scores))
-    #print('auc is ', auc, ', at epoch  ', epoch)
+    auc = metrics.roc_auc_score(np.asarray(gt_scores), np.asarray(pred_scores))
+    logloss = metrics.log_loss(np.asarray(gt_scores), np.asarray(pred_scores))
+    # print('auc is ', auc, ', at epoch  ', epoch)
     if output_prediction:
         wt.close()
-    return auc
+    return auc, logloss
 
 
 def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, field_cnt, params):
@@ -236,6 +237,7 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
     dim = params['dim']     # k in fm
     layer_sizes = params['layer_sizes']
 
+    # feature_cnt is total dimension of all features, features can be grouped into fields
     # w_linear = tf.Variable(tf.truncated_normal([feature_cnt, 1], stddev=init_value, mean=0), name='w_linear',
     #                        dtype=tf.float32)
     w_linear = tf.Variable(tf.truncated_normal([feature_cnt, 1], stddev=init_value, mean=0),  #tf.random_uniform([feature_cnt, 1], minval=-0.05, maxval=0.05), 
@@ -257,7 +259,9 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
             tf.pow(tf.sparse_tensor_dense_matmul(_x, w_fm), 2) - tf.sparse_tensor_dense_matmul(_xx, tf.pow(w_fm, 2)), 1,
             keep_dims=True)
 
-    ## deep neural network
+    # deep neural network
+    # filed_cnt indicates the number of valid connections to the last hidden layer.
+    # We don't need to specify which field each feature belongs to.
     if params['is_use_dnn_part']:
         w_fm_nn_input = tf.reshape(tf.gather(w_fm, _ind) * tf.expand_dims(_values, 1), [-1, field_cnt * dim])
         print(w_fm_nn_input.shape)
@@ -267,8 +271,7 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
         # tmp.append(tf.shape(tf.gather(w_fm, _ind) * tf.expand_dims(_values, 1)))
         # tmp.append(tf.shape(tf.gather(w_fm, _ind)))
 
-
-        #w_nn_layers = []
+        # w_nn_layers = []
         hidden_nn_layers = []
         hidden_nn_layers.append(w_fm_nn_input)
         last_layer_size = field_cnt * dim
@@ -278,6 +281,8 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
         b_nn_params = []
 
         for layer_size in layer_sizes:
+            '''Caution: initialization of w'''
+
             cur_w_nn_layer = tf.Variable(
                 tf.truncated_normal([last_layer_size, layer_size], stddev=init_value / math.sqrt(float(10)), mean=0),
                 name='w_nn_layer' + str(layer_idx), dtype=tf.float32)
@@ -305,7 +310,6 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
             w_nn_params.append(cur_w_nn_layer)
             b_nn_params.append(cur_b_nn_layer)
 
-
         w_nn_output = tf.Variable(tf.truncated_normal([last_layer_size, 1], stddev=init_value, mean=0), name='w_nn_output',
                                   dtype=tf.float32)
         nn_output = tf.matmul(hidden_nn_layers[-1], w_nn_output)
@@ -322,7 +326,7 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
         error = tf.reduce_mean(tf.squared_difference(preds, _y))  
     elif params['loss'] == 'log_loss':
         preds = tf.sigmoid(preds)
-        error = tf.reduce_mean(tf.losses.log_loss(predictions=preds,labels=_y))
+        error = tf.reduce_mean(tf.losses.log_loss(predictions=preds, labels=_y))
 
     lambda_w_linear = tf.constant(params['reg_w_linear'], name='lambda_w_linear')
     lambda_w_fm = tf.constant(params['reg_w_fm'], name='lambda_w_fm')
@@ -354,8 +358,6 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
     # tmp.append(tf.shape(tf.pow(w_linear, 2)))
     # tmp.append(tf.shape(tf.pow(w_fm, 2)))
 
-
-
     loss = tf.add(error, l2_norm)
     if params['optimizer']=='adadelta':	
         train_step = tf.train.AdadeltaOptimizer(eta).minimize(loss,var_list=model_params)#
@@ -379,54 +381,65 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
             tf.summary.histogram('nn_layer'+str(idx)+'_weights', w_nn_params[idx])
         
     merged_summary = tf.summary.merge_all()
-
-
     return train_step, loss, error, preds, merged_summary, tmp
+
 
 # cache data file with pickle format
 def pre_build_data_cache_if_need(infile, feature_cnt, batch_size):
-    outfile = infile.replace('.csv','.pkl').replace('.txt','.pkl')
+    outfile = infile.replace('.csv','.pkl').replace('.txt','.pkl').replace('.libfm','.pkl')
     if not os.path.isfile(outfile):
         print('pre_build_data_cache for ', infile)
         pre_build_data_cache(infile, outfile, feature_cnt, batch_size)
         print('pre_build_data_cache finished.' )
 
+
 def run():
-    # train_file = r'\\mlsdata\e$\Users\v-lianji\DeepRecsys\DeepFM\part01.svmlight_balanced.csv'
-    # test_file = r'\\mlsdata\e$\Users\v-lianji\DeepRecsys\DeepFM\part02.svmlight.csv'
 
     print ('begin running')
 
-    field_cnt = 46 #83
-    feature_cnt = 46 #5000
+    field_cnt = 21  # number of fields(features) 17
+    feature_cnt = 127177    # number of dimensions 46207
 
+    # field_cnt = 18  # number of fields(features) 17
+    # feature_cnt = 45617 # number of dimensions 46207
+
+    # train_file = '/home/deeplearning/disk2/dwt/data/S1_4_and_S5/S1_4.txt'
+    # test_file = '/home/deeplearning/disk2/dwt/data/S1_4_and_S5/S5.txt'
+
+    train_file = '/home/deeplearning/disk2/dwt/data/kdd/train.nn_no-cl-im-comb.libfm'
+    test_file = '/home/deeplearning/disk2/dwt/data/kdd/test.nn_no-cl-im-comb.libfm'
+
+    # train_file = '/home/deeplearning/disk2/dwt/data/kdd/train.sparse.libfm'
+    # test_file = '/home/deeplearning/disk2/dwt/data/kdd/test.sparse.libfm'
+
+    # train_file = '/home/deeplearning2/dwt/RemoteData/deepfm/kdd/train.sparse.libfm'
+    # test_file = '/home/deeplearning2/dwt/RemoteData/deepfm/kdd/test.sparse.libfm'
 
     params = {
         'reg_w_linear': 0.00010, 'reg_w_fm':0.0001, 'reg_w_nn': 0.0001,  #0.001
         'reg_w_l1': 0.0001,
         'init_value': 0.1,
         'layer_sizes': [10, 5],
-        'activations': ['tanh','tanh'],
+        'activations': ['relu','relu'], # tanh, tanh
         'eta': 0.1,
-        'n_epoch': 100,  # 500
-        'batch_size': 50,
-        'dim': 8,
+        'n_epoch': 40,  # 500
+        'batch_size': 40,
+        'dim': 6,
         'model_path': 'models',
         'log_path': 'logs/' + datetime.utcnow().strftime('%Y-%m-%d_%H_%M_%S'),
-        'train_file':  'data/S1_4_and_S5/S1_4.txt',  #'data/part01.svmlight_balanced.csv',
-        'test_file':    'data/S1_4_and_S5/S5.txt',
+        'train_file':  train_file,  #'data/part01.svmlight_balanced.csv',
+        'test_file':    test_file,
         'output_predictions': False,
-        'is_use_fm_part': False,
+        'is_use_fm_part': True,
         'is_use_dnn_part': True,
-        'learning_rate': 0.01, # [0.001, 0.01]
+        'learning_rate': 0.001, # [0.001, 0.01]
         'loss': 'log_loss', # [cross_entropy_loss, square_loss, log_loss]
         'optimizer': 'sgd' # [adam, ftrl, sgd]
     }
-  
 
     single_run(feature_cnt, field_cnt, params)
 
         
 if __name__ == '__main__':
+    print (datetime.now())
     run()
-
