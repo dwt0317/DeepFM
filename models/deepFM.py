@@ -56,29 +56,38 @@ def load_data_from_file_batching(file, batch_size):
 
 
 # features: [[idx1,val], [idx2,val], ...]
-def prepare_data_4_sp(labels, features, dim):
+def prepare_data_4_sp(labels, features, dim, cont_dim):
     instance_cnt = len(labels)
 
     indices = []    # feature indexes of each instance
     values = []     # feature values of each instance
     values_2 = []   # square of value of each instance
+    cont_values = []
     shape = [instance_cnt, dim]
+    cont_shape = [instance_cnt, cont_dim]
     feature_indices = []
 
     for i in range(instance_cnt):
         m = len(features[i])
+        cnt = 0
         for j in range(m):
             indices.append([i, features[i][j][0]])
             values.append(features[i][j][1])
             values_2.append(features[i][j][1] * features[i][j][1])
             feature_indices.append(features[i][j][0])
-
+            if 19 <= features[i][j][0] <= 28:
+                cont_values.append(features[i][j][1])
+                cnt += 1
+        if cnt != 10:
+            print('instance: ', i, cnt)
     res = {}
 
     res['indices'] = np.asarray(indices, dtype=np.int64)
     res['values'] = np.asarray(values, dtype=np.float32)
     res['values2'] = np.asarray(values_2, dtype=np.float32)
+    res['cont_values'] = np.asarray(cont_values, dtype=np.float32)
     res['shape'] = np.asarray(shape, dtype=np.int64)
+    res['cont_shape'] = np.asarray(cont_shape, dtype=np.int64)
     res['labels'] = np.asarray([[label] for label in labels], dtype=np.float32)
     res['feature_indices'] = np.asarray(feature_indices, dtype=np.int64)
 
@@ -94,22 +103,22 @@ def load_data_cache(filename):
                 break
 
 
-def pre_build_data_cache(infile, outfile, feature_cnt, batch_size):
+def pre_build_data_cache(infile, outfile, feature_cnt, continuous_cnt, batch_size):
     wt = open(outfile, 'wb')
     for labels, features in load_data_from_file_batching(infile, batch_size):
-        input_in_sp = prepare_data_4_sp(labels, features, feature_cnt)
+        input_in_sp = prepare_data_4_sp(labels, features, feature_cnt, continuous_cnt)
         pickle.dump(input_in_sp, wt)
     wt.close()
 
 
-def single_run(feature_cnt, field_cnt,  params):
+def single_run(feature_cnt, field_cnt, continuous_cnt, params):
 
     tf.reset_default_graph()
 
     print(params)
 
-    pre_build_data_cache_if_need(params['train_file'], feature_cnt, params['batch_size'])
-    pre_build_data_cache_if_need(params['test_file'], feature_cnt, params['batch_size'])
+    pre_build_data_cache_if_need(params['train_file'], feature_cnt, continuous_cnt, params['batch_size'])
+    pre_build_data_cache_if_need(params['test_file'], feature_cnt, continuous_cnt, params['batch_size'])
     
     params['train_file'] = params['train_file'].replace('.csv','.pkl').replace('.txt','.pkl').replace('.libfm','.pkl')
     params['test_file'] = params['test_file'].replace('.csv','.pkl').replace('.txt','.pkl').replace('.libfm','.pkl')
@@ -122,15 +131,16 @@ def single_run(feature_cnt, field_cnt,  params):
     _indices = tf.placeholder(tf.int64, shape=[None, 2], name='raw_indices')
     _values = tf.placeholder(tf.float32, shape=[None], name='raw_values')
     _values2 = tf.placeholder(tf.float32, shape=[None], name='raw_values_square')
+    _cont_values = tf.placeholder(tf.float32, shape=[None], name='raw_continuous_values')
     _shape = tf.placeholder(tf.int64, shape=[2], name='raw_shape')  # shape: [instance_cnt, feature_cnt]
+    _cont_shape = tf.placeholder(tf.int64, shape=[2], name='raw_continuous_shape')
 
     _y = tf.placeholder(tf.float32, shape=[None, 1], name='Y')
     _ind = tf.placeholder(tf.int64, shape=[None])
 
-    train_step, loss, error, preds, merged_summary, tmp = build_model(_indices, _values, _values2, _shape, _y, _ind,
-                                                                 feature_cnt, field_cnt, params)
-
-    # auc = tf.metrics.auc(_y, preds)
+    train_step, loss, error, preds, merged_summary, tmp = build_model(_indices, _values, _values2, _cont_values, _shape,
+                                                                      _cont_shape, _y, _ind, feature_cnt, field_cnt,
+                                                                      continuous_cnt, params)
     saver = tf.train.Saver()
     sess = tf.Session()
     init = tf.global_variables_initializer()
@@ -156,10 +166,11 @@ def single_run(feature_cnt, field_cnt,  params):
             time_load_data += time_cp01 - time_cp02
             iteration += 1
             glo_ite += 1
-            _,  cur_loss, summary, _tmp = sess.run([train_step,  loss, merged_summary, tmp], feed_dict={
+            _,  cur_loss, summary, _tmp = sess.run([train_step, loss, merged_summary, tmp], feed_dict={
                 _indices: training_input_in_sp['indices'], _values: training_input_in_sp['values'],
-                _shape: training_input_in_sp['shape'], _y: training_input_in_sp['labels'],
-                _values2: training_input_in_sp['values2'], _ind: training_input_in_sp['feature_indices']
+                _shape: training_input_in_sp['shape'], _cont_shape: training_input_in_sp['cont_shape'],
+                _y: training_input_in_sp['labels'], _values2: training_input_in_sp['values2'],
+                _cont_values: training_input_in_sp['cont_values'], _ind: training_input_in_sp['feature_indices']
             })
 
             time_cp02 = clock()
@@ -171,32 +182,32 @@ def single_run(feature_cnt, field_cnt,  params):
             # log_writer.add_summary(summary, glo_ite)
 
         end = clock()
-        #print('time for eopch ', eopch, ' ', "{0:.4f}min".format((end - start) / 60.0), ' time_load_data:', "{0:.4f}".format(time_load_data), ' time_sess:',
-        #      "{0:.4f}".format(time_sess), ' train_loss: ', train_loss_per_epoch, ' train_error: ', train_error_per_epoch)
-        if eopch % 5 == 0 or eopch == n_epoch-1:
+
+        if eopch % 3 == 0 or eopch == n_epoch-1:
             model_path = params['model_path'] + "/" + str(params['layer_sizes']).replace(':', '_') + str(
                 params['reg_w_linear']).replace(':', '_')
-            # print(model_path)
+            print(model_path)
 
-            # os.makedirs(model_path, exist_ok=True)
+            os.makedirs(model_path, exist_ok=True)
             # saver.save(sess, model_path, global_step=eopch)
 
-            auc, logloss = predict_test_file(preds, sess, params['test_file'], feature_cnt, _indices, _values, _shape, _y,
-                              _values2, _ind, eopch, batch_size, 'test', model_path, params['output_predictions'])
+            auc, logloss = predict_test_file(preds, sess, params['test_file'], feature_cnt, _indices, _values, _values2,
+                                             _cont_values, _shape, _cont_shape, _y, _ind, eopch, batch_size, 'test',
+                                             model_path, params['output_predictions'])
             rcd = 'auc is ', auc, 'logloss is ', logloss, ' at epoch  ', eopch, ', time is {0:.4f} min'.format((end - start) / 60.0), ', train_loss is {0:.2f}'.format(train_loss_per_epoch)
             print(rcd)
-            log_file = open(params['model_path'] + "/logs/result", "a")
+            log_file = open(params['model_path'] + "/result", "a")
             log_file.write(str(rcd) + '\n')
             log_file.close()
 
     # log_writer.close()
 
 
-def predict_test_file(preds, sess, test_file, feature_cnt, _indices, _values, _shape, _y, _values2, _ind, epoch,
-                      batch_size, tag, path, output_prediction=True):
+def predict_test_file(preds, sess, test_file, feature_cnt, _indices, _values, _values2, _cont_values, _shape,
+                      _cont_shape, _y, _ind, epoch, batch_size, tag, path, output_prediction=True):
     day = date.today()
     if output_prediction:
-        wt = open(path + 'pred/deepFM_pred_' + tag + str(epoch) + '-' + str(day)+'.txt', 'w')
+        wt = open(path + '/deepFM_pred_' + tag + str(epoch) + '-' + str(day)+'.txt', 'w')
 
     gt_scores = []
     pred_scores = []
@@ -204,8 +215,9 @@ def predict_test_file(preds, sess, test_file, feature_cnt, _indices, _values, _s
     for test_input_in_sp in load_data_cache(test_file):
         predictios = sess.run(preds, feed_dict={
             _indices: test_input_in_sp['indices'], _values: test_input_in_sp['values'],
-            _shape: test_input_in_sp['shape'], _y: test_input_in_sp['labels'], _values2: test_input_in_sp['values2'],
-            _ind: test_input_in_sp['feature_indices']
+            _shape: test_input_in_sp['shape'], _cont_shape: test_input_in_sp['cont_shape'],
+            _y: test_input_in_sp['labels'], _values2: test_input_in_sp['values2'],
+            _cont_values: test_input_in_sp['cont_values'], _ind: test_input_in_sp['feature_indices']
         }).reshape(-1).tolist()
         
         if output_prediction:
@@ -225,10 +237,11 @@ def predict_test_file(preds, sess, test_file, feature_cnt, _indices, _values, _s
     return auc, logloss
 
 
-def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, field_cnt, params):
+def build_model(_indices, _values, _values2, _cont_values, _shape, _cont_shape, _y, _ind, feature_cnt, field_cnt, continuous_cnt, params):
     eta = tf.constant(params['eta'])
     _x = tf.SparseTensor(_indices, _values, _shape)  # m * feature_cnt sparse tensor
     _xx = tf.SparseTensor(_indices, _values2, _shape)
+    _cont_x = tf.reshape(_cont_values, [-1, continuous_cnt])
 
     model_params = []
     tmp = []
@@ -236,6 +249,7 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
     init_value = params['init_value']
     dim = params['dim']     # k in fm
     layer_sizes = params['layer_sizes']
+    continuous_layer_sizes = params['continuous_layer_sizes']
 
     # feature_cnt is total dimension of all features, features can be grouped into fields
     # w_linear = tf.Variable(tf.truncated_normal([feature_cnt, 1], stddev=init_value, mean=0), name='w_linear',
@@ -250,6 +264,7 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
     # linear part
     preds += tf.sparse_tensor_dense_matmul(_x, w_linear, name='contr_from_linear')
 
+    # dense embedding of features
     w_fm = tf.Variable(tf.truncated_normal([feature_cnt, dim], stddev=init_value / math.sqrt(float(dim)), mean=0),
                            name='w_fm', dtype=tf.float32)
     model_params.append(w_fm)
@@ -260,16 +275,11 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
             keep_dims=True)
 
     # deep neural network
-    # filed_cnt indicates the number of valid connections to the last hidden layer.
+    # filed_cnt indicates the number of valid connections to the first hidden layer.
     # We don't need to specify which field each feature belongs to.
     if params['is_use_dnn_part']:
         w_fm_nn_input = tf.reshape(tf.gather(w_fm, _ind) * tf.expand_dims(_values, 1), [-1, field_cnt * dim])
         print(w_fm_nn_input.shape)
-
-        # tmp.append(tf.shape(tf.expand_dims(_values, 1)))
-        # tmp.append(tf.shape(w_fm_nn_input))
-        # tmp.append(tf.shape(tf.gather(w_fm, _ind) * tf.expand_dims(_values, 1)))
-        # tmp.append(tf.shape(tf.gather(w_fm, _ind)))
 
         # w_nn_layers = []
         hidden_nn_layers = []
@@ -291,15 +301,15 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
 
             cur_hidden_nn_layer = tf.nn.xw_plus_b(hidden_nn_layers[layer_idx], cur_w_nn_layer, cur_b_nn_layer)
             
-            if params['activations'][layer_idx]=='tanh':
+            if params['activations'][layer_idx] == 'tanh':
                 cur_hidden_nn_layer = tf.nn.tanh(cur_hidden_nn_layer)
-            elif params['activations'][layer_idx]=='sigmoid':
+            elif params['activations'][layer_idx] == 'sigmoid':
                 cur_hidden_nn_layer = tf.nn.sigmoid(cur_hidden_nn_layer)
-            elif params['activations'][layer_idx]=='relu':
+            elif params['activations'][layer_idx] == 'relu':
                 cur_hidden_nn_layer = tf.nn.relu(cur_hidden_nn_layer)
             
-            #cur_hidden_nn_layer = tf.matmul(hidden_nn_layers[layer_idx], cur_w_nn_layer)
-            #w_nn_layers.append(cur_w_nn_layer)
+            # cur_hidden_nn_layer = tf.matmul(hidden_nn_layers[layer_idx], cur_w_nn_layer)
+            # w_nn_layers.append(cur_w_nn_layer)
             hidden_nn_layers.append(cur_hidden_nn_layer)
 
             layer_idx += 1
@@ -315,8 +325,50 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
         nn_output = tf.matmul(hidden_nn_layers[-1], w_nn_output)
         model_params.append(w_nn_output)
         w_nn_params.append(w_nn_output)
-
         preds += nn_output
+
+    if params['is_use_continuous_part']:
+        cont_hidden_nn_layers = []
+        cont_hidden_nn_layers.append(_cont_x)
+        last_layer_size = continuous_cnt
+
+        cont_w_nn_params = []
+        cont_b_nn_params = []
+
+        layer_idx = 0
+        for layer_size in continuous_layer_sizes:
+            cur_w_nn_layer = tf.Variable(
+                tf.truncated_normal([last_layer_size, layer_size], stddev=init_value / math.sqrt(float(last_layer_size)), mean=0),
+                name='w_nn_layer' + str(layer_idx), dtype=tf.float32)
+            cur_b_nn_layer = tf.Variable(tf.truncated_normal([layer_size], stddev=init_value, mean=0),
+                                         name='b_nn_layer' + str(layer_idx))
+
+            cur_hidden_nn_layer = tf.nn.xw_plus_b(cont_hidden_nn_layers[layer_idx], cur_w_nn_layer, cur_b_nn_layer)
+
+            if params['activations'][layer_idx] == 'tanh':
+                cur_hidden_nn_layer = tf.nn.tanh(cur_hidden_nn_layer)
+            elif params['activations'][layer_idx] == 'sigmoid':
+                cur_hidden_nn_layer = tf.nn.sigmoid(cur_hidden_nn_layer)
+            elif params['activations'][layer_idx] == 'relu':
+                cur_hidden_nn_layer = tf.nn.relu(cur_hidden_nn_layer)
+
+            cont_hidden_nn_layers.append(cur_hidden_nn_layer)
+
+            layer_idx += 1
+            last_layer_size = layer_size
+
+            model_params.append(cur_w_nn_layer)
+            model_params.append(cur_b_nn_layer)
+            cont_w_nn_params.append(cur_w_nn_layer)
+            cont_b_nn_params.append(cur_b_nn_layer)
+
+        cont_w_nn_output = tf.Variable(tf.truncated_normal([last_layer_size, 1], stddev=init_value, mean=0),
+                                  name='w_nn_output',
+                                  dtype=tf.float32)
+        cont_nn_output = tf.matmul(cont_hidden_nn_layers[-1], cont_w_nn_output)
+        model_params.append(cont_w_nn_output)
+        cont_w_nn_params.append(cont_w_nn_output)
+        preds += cont_nn_output
 
     if params['loss'] == 'cross_entropy_loss': # 'loss': 'log_loss'
         error = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=tf.reshape(preds,[-1])
@@ -350,25 +402,29 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
     if params['is_use_dnn_part']:
         for i in range(len(w_nn_params)):
             l2_norm += tf.multiply(lambda_w_nn, tf.reduce_sum(tf.pow(w_nn_params[i], 2)))
-
         for i in range(len(b_nn_params)):
             l2_norm += tf.multiply(lambda_w_nn, tf.reduce_sum(tf.pow(b_nn_params[i], 2)))
 
+    if params['is_use_continuous_part']:
+        for i in range(len(cont_w_nn_params)):
+            l2_norm += tf.multiply(lambda_w_nn, tf.reduce_sum(tf.pow(cont_w_nn_params[i], 2)))
+        for i in range(len(cont_b_nn_params)):
+            l2_norm += tf.multiply(lambda_w_nn, tf.reduce_sum(tf.pow(cont_b_nn_params[i], 2)))
 
     # tmp.append(tf.shape(tf.pow(w_linear, 2)))
     # tmp.append(tf.shape(tf.pow(w_fm, 2)))
 
     loss = tf.add(error, l2_norm)
     if params['optimizer']=='adadelta':	
-        train_step = tf.train.AdadeltaOptimizer(eta).minimize(loss,var_list=model_params)#
+        train_step = tf.train.AdadeltaOptimizer(eta).minimize(loss, var_list=model_params)#
     elif params['optimizer']=='sgd':
-        train_step = tf.train.GradientDescentOptimizer(params['learning_rate']).minimize(loss,var_list=model_params)
+        train_step = tf.train.GradientDescentOptimizer(params['learning_rate']).minimize(loss, var_list=model_params)
     elif params['optimizer']=='adam':
-        train_step = tf.train.AdamOptimizer(params['learning_rate']).minimize(loss,var_list=model_params)
+        train_step = tf.train.AdamOptimizer(params['learning_rate']).minimize(loss, var_list=model_params)
     elif params['optimizer']=='ftrl':
-        train_step = tf.train.FtrlOptimizer(params['learning_rate']).minimize(loss,var_list=model_params)
+        train_step = tf.train.FtrlOptimizer(params['learning_rate']).minimize(loss, var_list=model_params)
     else:
-        train_step = tf.train.GradientDescentOptimizer(params['learning_rate']).minimize(loss,var_list=model_params)	    
+        train_step = tf.train.GradientDescentOptimizer(params['learning_rate']).minimize(loss, var_list=model_params)
 
     tf.summary.scalar('square_error', error)
     tf.summary.scalar('loss', loss)
@@ -377,67 +433,71 @@ def build_model(_indices, _values, _values2, _shape, _y, _ind, feature_cnt, fiel
     if params['is_use_fm_part']:
         tf.summary.histogram('fm_weights_hist', w_fm)
     if params['is_use_dnn_part']:
-        for idx in range(len(w_nn_params))  :
+        for idx in range(len(w_nn_params)):
             tf.summary.histogram('nn_layer'+str(idx)+'_weights', w_nn_params[idx])
-        
+    if params['is_use_continuous_part']:
+        for idx in range(len(cont_w_nn_params)):
+            tf.summary.histogram('cont_nn_layer'+str(idx)+'_weights', cont_w_nn_params[idx])
+
     merged_summary = tf.summary.merge_all()
     return train_step, loss, error, preds, merged_summary, tmp
 
 
 # cache data file with pickle format
-def pre_build_data_cache_if_need(infile, feature_cnt, batch_size):
+def pre_build_data_cache_if_need(infile, feature_cnt, continuous_cont, batch_size):
     outfile = infile.replace('.csv','.pkl').replace('.txt','.pkl').replace('.libfm','.pkl')
     if not os.path.isfile(outfile):
         print('pre_build_data_cache for ', infile)
-        pre_build_data_cache(infile, outfile, feature_cnt, batch_size)
+        pre_build_data_cache(infile, outfile, feature_cnt, continuous_cont, batch_size)
         print('pre_build_data_cache finished.' )
 
 
 def run():
 
-    print ('begin running')
+    print('begin running')
 
-    field_cnt = 21  # number of fields(features) 17
-    feature_cnt = 127177    # number of dimensions 46207
+    field_cnt = 20  # number of fields(features) 17
+    feature_cnt = 37408    # number of dimensions 46207
+    continuous_cnt = 10  # dimensions of continuous features
 
     # field_cnt = 18  # number of fields(features) 17
     # feature_cnt = 45617 # number of dimensions 46207
 
-    # train_file = '/home/deeplearning/disk2/dwt/data/S1_4_and_S5/S1_4.txt'
-    # test_file = '/home/deeplearning/disk2/dwt/data/S1_4_and_S5/S5.txt'
+    dir = 'E:/Exchange/computing_ad/data/kdd cup 2012 track2/sample/features/mini/'
 
-    train_file = '/home/deeplearning/disk2/dwt/data/kdd/train.nn_no-cl-im-comb.libfm'
-    test_file = '/home/deeplearning/disk2/dwt/data/kdd/test.nn_no-cl-im-comb.libfm'
+    train_file = dir + 'mini_train.libfm'
+    test_file = dir + 'mini_test.libfm'
 
     # train_file = '/home/deeplearning/disk2/dwt/data/kdd/train.sparse.libfm'
     # test_file = '/home/deeplearning/disk2/dwt/data/kdd/test.sparse.libfm'
 
-    # train_file = '/home/deeplearning2/dwt/RemoteData/deepfm/kdd/train.sparse.libfm'
-    # test_file = '/home/deeplearning2/dwt/RemoteData/deepfm/kdd/test.sparse.libfm'
-
     params = {
-        'reg_w_linear': 0.00010, 'reg_w_fm':0.0001, 'reg_w_nn': 0.0001,  #0.001
+        'reg_w_linear': 0.0001, 'reg_w_fm':0.0001, 'reg_w_nn': 0.0001,  #0.001
         'reg_w_l1': 0.0001,
         'init_value': 0.1,
         'layer_sizes': [10, 5],
+        'continuous_layer_sizes': [6, 4],
         'activations': ['relu','relu'], # tanh, tanh
         'eta': 0.1,
-        'n_epoch': 40,  # 500
-        'batch_size': 40,
-        'dim': 6,
+        'n_epoch': 50,  # 500
+        'batch_size': 100,
+        'dim': 8,
         'model_path': 'models',
         'log_path': 'logs/' + datetime.utcnow().strftime('%Y-%m-%d_%H_%M_%S'),
         'train_file':  train_file,  #'data/part01.svmlight_balanced.csv',
         'test_file':    test_file,
-        'output_predictions': False,
+        'output_predictions': True,
         'is_use_fm_part': True,
         'is_use_dnn_part': True,
-        'learning_rate': 0.001, # [0.001, 0.01]
+        'is_use_continuous_part': True,
+        'learning_rate': 0.006, # [0.001, 0.01]
         'loss': 'log_loss', # [cross_entropy_loss, square_loss, log_loss]
         'optimizer': 'sgd' # [adam, ftrl, sgd]
     }
-
-    single_run(feature_cnt, field_cnt, params)
+    # log_file = open(params['model_path'] + '/result', "a")
+    # log_file.write("aa")
+    # log_file.close()
+    single_run(feature_cnt, field_cnt, continuous_cnt, params)
 
         
 if __name__ == '__main__':
